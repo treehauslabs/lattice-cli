@@ -18,8 +18,11 @@ struct ClusterCommand: AsyncParsableCommand {
     @Option(help: "Base P2P port (each node increments by 1)")
     var basePort: UInt16 = 4001
 
-    @Flag(help: "Enable mining on all nodes")
-    var mining: Bool = false
+    @Option(
+        name: .long,
+        help: "Comma-separated chain directories to mine (e.g. Nexus,AppChain)"
+    )
+    var mine: String?
 
     @Option(help: "Target block time in milliseconds")
     var blockTime: UInt64 = 1000
@@ -46,7 +49,8 @@ struct ClusterCommand: AsyncParsableCommand {
         printKeyValue("Ports", "\(basePort)–\(basePort + UInt16(nodes) - 1)")
         printKeyValue("Storage", storagePath)
         printKeyValue("Block Time", "\(blockTime)ms")
-        printKeyValue("Mining", mining ? "all nodes" : "disabled")
+        let miningChains = mine?.split(separator: ",").map(String.init) ?? []
+        printKeyValue("Mining", miningChains.isEmpty ? "disabled" : miningChains.joined(separator: ", "))
 
         let fm = FileManager.default
         if !fm.fileExists(atPath: storagePath) {
@@ -83,11 +87,13 @@ struct ClusterCommand: AsyncParsableCommand {
             printSuccess("\(id) listening on port \(status.port)")
         }
 
-        if mining {
+        if !miningChains.isEmpty {
             printHeader("Starting Miners")
             for id in ids {
-                try await client.startMining(nodeId: id, directory: "Nexus")
-                printSuccess("\(id) mining Nexus")
+                for chain in miningChains {
+                    try await client.startMining(nodeId: id, directory: chain)
+                    printSuccess("\(id) mining \(chain)")
+                }
             }
         }
 
@@ -123,9 +129,6 @@ struct ClusterCommand: AsyncParsableCommand {
     }
 
     func printClusterStatus(client: MultiNodeClient, ids: [String]) async {
-        let statuses = await client.allNodeStatuses()
-        guard !statuses.isEmpty else { return }
-
         let timestamp = DateFormatter.localizedString(
             from: Date(),
             dateStyle: .none,
@@ -133,23 +136,27 @@ struct ClusterCommand: AsyncParsableCommand {
         )
         print("\(Style.dim)── \(timestamp) ──\(Style.reset)")
 
-        var maxHeight: UInt64 = 0
-        for s in statuses {
-            if s.chainHeight > maxHeight { maxHeight = s.chainHeight }
-        }
+        for id in ids {
+            guard let node = await client.getNode(id: id) else { continue }
+            let chains = await node.chainStatus()
+            let miningCount = chains.filter(\.mining).count
+            let miningLabel = miningCount > 0
+                ? "\(Style.green)\(miningCount) chain\(miningCount == 1 ? "" : "s")\(Style.reset)"
+                : "\(Style.dim)idle\(Style.reset)"
 
-        for s in statuses {
-            let miningLabel = s.miningDirectories.isEmpty
-                ? "\(Style.dim)idle\(Style.reset)"
-                : "\(Style.green)mining\(Style.reset)"
-            let heightColor = s.chainHeight == maxHeight ? Style.green : Style.yellow
-            let tip = String(s.chainTip.prefix(16)) + "..."
+            print("  \(Style.bold)\(id)\(Style.reset)  \(miningLabel)")
 
-            print("  \(Style.bold)\(s.id)\(Style.reset)"
-                + "  h=\(heightColor)\(s.chainHeight)\(Style.reset)"
-                + "  tip=\(Style.dim)\(tip)\(Style.reset)"
-                + "  mempool=\(s.mempoolCount)"
-                + "  \(miningLabel)")
+            for c in chains {
+                let tip = String(c.tip.prefix(16)) + "..."
+                let status = c.mining
+                    ? "\(Style.green)mining\(Style.reset)"
+                    : "\(Style.dim)--\(Style.reset)"
+                print("    \(Style.cyan)\(c.directory)\(Style.reset)"
+                    + "  h=\(Style.green)\(c.height)\(Style.reset)"
+                    + "  tip=\(Style.dim)\(tip)\(Style.reset)"
+                    + "  mempool=\(c.mempoolCount)"
+                    + "  \(status)")
+            }
         }
         print("")
     }
